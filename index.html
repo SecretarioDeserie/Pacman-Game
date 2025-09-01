@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini Pac-Man — JS Canvas</title>
+  <style>
+    :root{--bg:#000;--pac:#FFEB3B;--wall:#001F3F;--dot:#FFF;--power:#FF5722;--ghost-blue:#00BCD4}
+    html,body{height:100%;margin:0;background:var(--bg);display:flex;align-items:center;justify-content:center;font-family:Inter, system-ui, Arial;color:#fff}
+    #gameWrap{width:640px}
+    canvas{display:block;width:100%;background:#000;border:6px solid #111;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+    .hud{display:flex;justify-content:space-between;padding:8px 4px;align-items:center}
+    .hud div{font-size:14px}
+    button{background:#111;border:1px solid #333;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <div class="hud">
+      <div>Score: <span id="score">0</span></div>
+      <div>Lives: <span id="lives">3</span></div>
+      <div><button id="restart">Restart</button></div>
+    </div>
+    <canvas id="c" width="608" height="672"></canvas>
+  </div>
+
+<script>
+/*
+  Mini Pac-Man
+  - Grid based simple implementation for learning / prototype
+  - WASD / Arrow keys
+*/
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const restartBtn = document.getElementById('restart');
+
+const TILE = 32;                    // tile size in px
+const COLS = 19;                    // width in tiles (19*32=608)
+const ROWS = 21;                    // height in tiles (21*32=672)
+
+// Legend for map:
+// 0 = empty / dot
+// 1 = wall
+// 2 = power pellet
+// 3 = empty (no dot) -- corridor
+
+// Simple classic-style maze (19x21)
+const raw = [
+  "1111111111111111111",
+  "1000000001000000001",
+  "1011111101011111101",
+  "1020000100001000201",
+  "1011110101111011101",
+  "1000000100000000001",
+  "1011101110111011101",
+  "1000100000001000001",
+  "1110101111101010111",
+  "0000101000001001000",
+  "1110101011111010111",
+  "1000000001000000001",
+  "1011111101011111101",
+  "1020000100001000201",
+  "1011110111111011101",
+  "1000000100000000001",
+  "1011101110111011101",
+  "1000000000000000001",
+  "1111111111111111111",
+  "0000000000000000000",
+  "0000000000000000000"
+];
+
+// Convert to map numbers and place dots in zeros (0->dot)
+let map = raw.slice(0, ROWS).map(r => r.split('').map(ch => parseInt(ch)));
+
+function resetDots() {
+  dots = [];
+  for (let y=0;y<ROWS;y++){
+    for (let x=0;x<COLS;x++){
+      if (map[y][x] === 0) dots.push({x,y,collected:false});
+      if (map[y][x] === 2) dots.push({x,y,power:true,collected:false});
+    }
+  }
+}
+
+let dots = [];
+resetDots();
+
+// Player
+const player = {
+  x:9, y:15,      // tile coords
+  px: 9*32, py: 15*32, // pixel coords
+  dir: {x:0,y:0}, // current movement direction
+  nextDir: {x:0,y:0},
+  lives: 3,
+  score: 0,
+  radius: TILE*0.4,
+  speed: 120 // pixels per second
+};
+
+// Ghosts (simple AI)
+class Ghost{
+  constructor(x,y,color){
+    this.x = x; this.y = y; 
+    this.px = x*32; this.py = y*32;
+    this.startX = x; this.startY = y;
+    this.dir = {x:0,y:0};
+    this.color = color;
+    this.speed = 80; // pixels per second
+    this.mode = 'chase'; // chase or frightened
+    this.frightTimer = 0;
+  }
+  reset(){ 
+    this.x = this.startX; this.y = this.startY; 
+    this.px = this.startX*32; this.py = this.startY*32;
+    this.dir={x:0,y:0}; 
+    this.mode='chase'; 
+  }
+}
+
+const ghosts = [
+  new Ghost(9,7,'red'),
+  new Ghost(8,8,'pink'),
+  new Ghost(10,8,'cyan'),
+  new Ghost(9,8,'orange')
+];
+
+let lastTime = 0;
+let accumulator = 0;
+const FPS = 60;
+const step = 1/FPS;
+let powerMode = false;
+let powerTimer = 0;
+const POWER_DURATION = 8; // seconds
+let gameOver = false;
+let win = false;
+let paused = false;
+
+function canMoveTo(nx, ny){
+  if (nx<0 || nx>=COLS || ny<0 || ny>=ROWS) return false;
+  return map[ny][nx] !== 1;
+}
+
+function tileCenter(tx, ty){
+  return {px: tx*TILE + TILE/2, py: ty*TILE + TILE/2};
+}
+
+// Input
+window.addEventListener('keydown', (e)=>{
+  const k = e.key;
+  if (k === 'ArrowUp' || k === 'w' || k === 'W') setNextDir(0,-1);
+  if (k === 'ArrowDown' || k === 's' || k === 'S') setNextDir(0,1);
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') setNextDir(-1,0);
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') setNextDir(1,0);
+  if (k === 'p') paused = !paused;
+});
+
+function setNextDir(dx,dy){ player.nextDir.x = dx; player.nextDir.y = dy; }
+
+// Restart
+restartBtn.addEventListener('click', ()=>{
+  restart();
+});
+
+function restart(){
+  resetDots();
+  player.x = 9; player.y = 15; 
+  player.px = 9*32; player.py = 15*32;
+  player.dir={x:0,y:0}; player.nextDir={x:0,y:0}; 
+  player.lives=3; player.score=0;
+  ghosts.forEach(g=>g.reset()); 
+  powerMode=false; powerTimer=0; gameOver=false; win=false;
+  updateHUD();
+}
+
+function updateHUD(){ scoreEl.textContent = player.score; livesEl.textContent = player.lives; }
+
+// Helpers
+function rndChoice(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+// Ghost movement: pick any non-wall direction not directly opposite current dir (simple)
+function ghostThink(ghost){
+  if (ghost.mode === 'frightened'){
+    // random wander
+    const choices = [];
+    const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+    for (const d of dirs){
+      const nx = ghost.x + d.x; const ny = ghost.y + d.y;
+      if (canMoveTo(nx,ny)) choices.push(d);
+    }
+    if (choices.length) ghost.dir = rndChoice(choices);
+    return;
+  }
+
+  // simple chase: move to minimize Manhattan distance to player
+  const candidates = [];
+  const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+  for (const d of dirs){
+    const nx = ghost.x + d.x; const ny = ghost.y + d.y;
+    if (!canMoveTo(nx,ny)) continue;
+    // avoid immediate reversing
+    if (ghost.dir.x === -d.x && ghost.dir.y === -d.y) continue;
+    candidates.push({d,dist:Math.abs((ghost.x+d.x)-player.x)+Math.abs((ghost.y+d.y)-player.y)});
+  }
+  if (candidates.length===0) return;
+  // pick smallest distance
+  candidates.sort((a,b)=>a.dist-b.dist);
+  ghost.dir = candidates[0].d;
+}
+
+function update(dt){
+  if (gameOver || win || paused) return;
+
+  // Update player position
+  const movePlayer = () => {
+    // Try to change player dir if possible
+    const ndx = player.nextDir.x, ndy = player.nextDir.y;
+    if (ndx !== 0 || ndy !== 0){
+      const tryX = Math.floor(player.px/TILE) + ndx;
+      const tryY = Math.floor(player.py/TILE) + ndy;
+      if (canMoveTo(tryX, tryY)) {
+        player.dir = {x:ndx,y:ndy};
+      }
+    }
+    
+    // Move player based on speed
+    const moveX = player.dir.x * player.speed * dt;
+    const moveY = player.dir.y * player.speed * dt;
+    
+    if (player.dir.x !== 0 || player.dir.y !== 0) {
+      let newPx = player.px + moveX;
+      let newPy = player.py + moveY;
+      
+      // Check for wall collisions
+      const nextTileX = Math.floor((newPx + (player.dir.x > 0 ? player.radius : -player.radius)) / TILE);
+      const nextTileY = Math.floor((newPy + (player.dir.y > 0 ? player.radius : -player.radius)) / TILE);
+      
+      if (!canMoveTo(nextTileX, Math.floor(player.py/TILE))) {
+        newPx = player.px;
+        player.dir.x = 0;
+      }
+      
+      if (!canMoveTo(Math.floor(player.px/TILE), nextTileY)) {
+        newPy = player.py;
+        player.dir.y = 0;
+      }
+      
+      // Update position
+      player.px = newPx;
+      player.py = newPy;
+      
+      // Wrap around tunnel
+      if (player.px < -player.radius) player.px = canvas.width + player.radius;
+      if (player.px > canvas.width + player.radius) player.px = -player.radius;
+      
+      // Update tile position
+      player.x = Math.floor(player.px / TILE);
+      player.y = Math.floor(player.py / TILE);
+      
+      checkDotCollision();
+    }
+  };
+  
+  movePlayer();
+
+  // Ghosts movement
+  ghosts.forEach(g => {
+    // mode timers
+    if (g.mode === 'frightened'){
+      g.frightTimer -= dt;
+      if (g.frightTimer <= 0){ g.mode = 'chase'; }
+    }
+
+    // decide direction occasionally
+    g.thinkAcc = (g.thinkAcc||0) + dt;
+    if (g.thinkAcc > 0.5){ // every 0.5s
+      g.thinkAcc = 0;
+      ghostThink(g);
+    }
+
+    // move based on speed
+    const moveX = g.dir.x * g.speed * dt;
+    const moveY = g.dir.y * g.speed * dt;
+    
+    let newPx = g.px + moveX;
+    let newPy = g.py + moveY;
+    
+    // Check for wall collisions
+    const nextTileX = Math.floor((newPx + (g.dir.x > 0 ? 16 : -16)) / TILE);
+    const nextTileY = Math.floor((newPy + (g.dir.y > 0 ? 16 : -16)) / TILE);
+    
+    if (!canMoveTo(nextTileX, Math.floor(g.py/TILE))) {
+      newPx = g.px;
+      g.dir.x = 0;
+    }
+    
+    if (!canMoveTo(Math.floor(g.px/TILE), nextTileY)) {
+      newPy = g.py;
+      g.dir.y = 0;
+    }
+    
+    // Update position
+    g.px = newPx;
+    g.py = newPy;
+    
+    // Update tile position
+    g.x = Math.floor(g.px / TILE);
+    g.y = Math.floor(g.py / TILE);
+  });
+
+  // Power mode timer
+  if (powerMode){
+    powerTimer -= dt;
+    if (powerTimer <= 0){ powerMode = false; ghosts.forEach(g=>g.mode='chase'); }
+  }
+
+  // collisions
+  ghosts.forEach(g=>{
+    const dx = player.px - g.px;
+    const dy = player.py - g.py;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    
+    if (dist < player.radius + 16){ // 16 is ghost radius
+      if (g.mode === 'frightened'){
+        // eat ghost
+        player.score += 200;
+        g.reset();
+      } else {
+        // player dies
+        player.lives -= 1;
+        updateHUD();
+        if (player.lives <= 0) { gameOver = true; }
+        else {
+          // reset positions
+          player.x = 9; player.y = 15; 
+          player.px = 9*32; player.py = 15*32;
+          player.dir={x:0,y:0}; player.nextDir={x:0,y:0};
+          ghosts.forEach(g=>g.reset());
+        }
+      }
+    }
+  });
+
+  // check win (all dots collected)
+  if (dots.every(d=>d.collected)) { win = true; }
+}
+
+function checkDotCollision(){
+  const playerTileX = Math.floor(player.px / TILE);
+  const playerTileY = Math.floor(player.py / TILE);
+  
+  for (const d of dots){
+    if (!d.collected && d.x === playerTileX && d.y === playerTileY){
+      d.collected = true;
+      if (d.power){
+        // power pellet
+        powerMode = true; powerTimer = POWER_DURATION;
+        ghosts.forEach(g=>{ g.mode='frightened'; g.frightTimer = POWER_DURATION; });
+        player.score += 50;
+      } else {
+        player.score += 10;
+      }
+      updateHUD();
+      break;
+    }
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // draw walls and floor
+  for (let y=0;y<ROWS;y++){
+    for (let x=0;x<COLS;x++){
+      const val = map[y][x];
+      const px = x*TILE, py = y*TILE;
+      if (val === 1){
+        ctx.fillStyle = '#0b3a5a'; ctx.fillRect(px,py,TILE,TILE);
+        // wall inner
+        ctx.fillStyle = '#052235'; ctx.fillRect(px+4,py+4,TILE-8,TILE-8);
+      } else {
+        // floor slightly darker
+        ctx.fillStyle = '#000'; ctx.fillRect(px,py,TILE,TILE);
+      }
+    }
+  }
+
+  // draw dots
+  for (const d of dots){
+    if (d.collected) continue;
+    const center = tileCenter(d.x,d.y);
+    if (d.power){
+      ctx.beginPath(); ctx.arc(center.px, center.py, TILE*0.18, 0, Math.PI*2); ctx.fillStyle = '#FF5722'; ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(center.px, center.py, TILE*0.08, 0, Math.PI*2); ctx.fillStyle = '#fff'; ctx.fill();
+    }
+  }
+
+  // draw player (Pac-Man)
+  // simple chomping animation based on time
+  const t = Date.now()/200;
+  const mouth = Math.abs(Math.sin(t))*0.35;
+  ctx.fillStyle = '#FFEB3B';
+  ctx.beginPath();
+  ctx.moveTo(player.px, player.py);
+  ctx.arc(player.px, player.py, player.radius, mouth*Math.PI, (2-mouth)*Math.PI);
+  ctx.closePath(); ctx.fill();
+
+  // draw ghosts
+  ghosts.forEach(g=>{
+    // body
+    if (g.mode === 'frightened'){
+      ctx.fillStyle = '#6ea8ff';
+    } else {
+      ctx.fillStyle = g.color;
+    }
+    ctx.beginPath();
+    ctx.arc(g.px, g.py-6, TILE*0.36, Math.PI, 0);
+    ctx.lineTo(g.px+TILE*0.36, g.py+TILE*0.28);
+    // scalloped bottom
+    const step = TILE*0.12;
+    for (let i=1;i<6;i++) ctx.lineTo(g.px+TILE*0.36 - i*step, g.py+TILE*0.28 + (i%2? -2:2));
+    ctx.closePath(); ctx.fill();
+    // eyes
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(g.px-6,g.py-2,5,7,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(g.px+6,g.py-2,5,7,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.ellipse(g.px-6 + (g.dir.x*2), g.py-2 + (g.dir.y*2), 2.5,4,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(g.px+6 + (g.dir.x*2), g.py-2 + (g.dir.y*2), 2.5,4,0,0,Math.PI*2); ctx.fill();
+  });
+
+  // overlay messages
+  if (gameOver){
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, canvas.height/2-60, canvas.width, 120);
+    ctx.fillStyle = '#fff'; ctx.font = '34px Arial'; ctx.textAlign='center'; ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2);
+  }
+  if (win){
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, canvas.height/2-60, canvas.width, 120);
+    ctx.fillStyle = '#fff'; ctx.font = '28px Arial'; ctx.textAlign='center'; ctx.fillText('YOU WIN — All dots cleared!', canvas.width/2, canvas.height/2);
+  }
+}
+
+function loop(ts){
+  if (!lastTime) lastTime = ts;
+  const dt = Math.min(0.05, (ts-lastTime)/1000);
+  lastTime = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// init
+updateHUD();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
